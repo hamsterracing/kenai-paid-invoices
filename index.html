@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Оплаченные счета</title>
+<style>
+:root{--bg:#0f0f0f;--surface:#181818;--border:#2a2a2a;--text:#f0f0f0;--muted:#888;--accent:#c8f135;--ok:#34d399;--err:#f87171;--info:#60a5fa}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;min-height:100vh;display:flex;justify-content:center;padding:2rem 1rem}
+.wrap{width:100%;max-width:560px;display:flex;flex-direction:column;gap:12px}
+h1{font-size:20px;font-weight:600;margin-bottom:4px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 20px}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+input[type=password]{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;padding:10px 12px;outline:none}
+input[type=password]:focus{border-color:var(--accent)}
+.drop{margin-top:14px;border:1.5px dashed #3a3a3a;border-radius:10px;padding:2rem 1rem;text-align:center;cursor:pointer;color:var(--muted);font-size:14px}
+.drop:hover,.drop.over{border-color:var(--accent);background:rgba(200,241,53,.08)}
+.drop.ok{border-style:solid;border-color:var(--ok);color:var(--ok)}
+input[type=file]{display:none}
+button{width:100%;border:none;border-radius:10px;font-size:15px;font-weight:600;padding:14px;cursor:pointer;margin-top:12px}
+.main{background:var(--accent);color:#0f0f0f}
+.paid{background:var(--ok);color:#0f0f0f}
+.ghost{background:transparent;color:var(--muted);border:1px solid var(--border);font-weight:500;font-size:13px;padding:10px}
+button:disabled{opacity:.35;cursor:not-allowed}
+.row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px}
+.row:last-child{border-bottom:none}
+.row span:first-child{color:var(--muted)}
+.row span:last-child{text-align:right;font-weight:500}
+.msg{border-radius:10px;padding:12px 16px;font-size:14px;line-height:1.5;display:none}
+.msg.info{display:block;background:rgba(96,165,250,.1);color:var(--info)}
+.msg.ok{display:block;background:rgba(52,211,153,.12);color:var(--ok)}
+.msg.err{display:block;background:rgba(248,113,113,.12);color:var(--err)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Оплаченные счета</h1>
+
+  <div class="card">
+    <label for="code">Код доступа</label>
+    <input type="password" id="code" autocomplete="off">
+    <div class="drop" id="drop">Нажми или перетащи PDF счёта</div>
+    <input type="file" id="file" accept="application/pdf">
+    <button class="main" id="parseBtn" disabled>Распознать счёт</button>
+  </div>
+
+  <div class="card hide" id="preview">
+    <div class="row"><span>Номер счёта</span><span id="f_no"></span></div>
+    <div class="row"><span>Дата счёта</span><span id="f_date"></span></div>
+    <div class="row"><span>От кого</span><span id="f_from"></span></div>
+    <div class="row"><span>Кому</span><span id="f_to"></span></div>
+    <div class="row"><span>Сумма</span><span id="f_amt"></span></div>
+    <button class="paid" id="paidBtn">✓ Оплачено</button>
+    <button class="ghost" id="resetBtn">Другой счёт</button>
+  </div>
+
+  <div class="msg" id="msg"></div>
+</div>
+
+<script>
+var WORKER = 'https://paid-invoice-proxy.i9030138800.workers.dev';
+var SCRIPT = 'https://script.google.com/macros/s/AKfycbwBH2-RNsrvj_GlUnm46ZGggY-oRmMYcUvcDqgj4QEXypMFXnzbAdsUcPCz6zwAYvs33g/exec';
+
+var pdf64 = null, inv = null;
+var $ = function (id) { return document.getElementById(id); };
+
+function show(type, text) { var m = $('msg'); m.className = 'msg ' + type; m.textContent = text; }
+function clearMsg() { $('msg').className = 'msg'; }
+
+try { var saved = localStorage.getItem('paid-code'); if (saved) $('code').value = saved; } catch (e) {}
+
+$('drop').onclick = function () { $('file').click(); };
+$('drop').ondragover = function (e) { e.preventDefault(); $('drop').classList.add('over'); };
+$('drop').ondragleave = function () { $('drop').classList.remove('over'); };
+$('drop').ondrop = function (e) {
+  e.preventDefault(); $('drop').classList.remove('over');
+  if (e.dataTransfer.files[0]) takeFile(e.dataTransfer.files[0]);
+};
+$('file').onchange = function () { if (this.files[0]) takeFile(this.files[0]); };
+
+function takeFile(f) {
+  if (f.type !== 'application/pdf') { show('err', 'Нужен файл PDF'); return; }
+  clearMsg();
+  $('drop').textContent = '✓ ' + f.name;
+  $('drop').classList.add('ok');
+  var r = new FileReader();
+  r.onload = function (e) { pdf64 = e.target.result.split(',')[1]; $('parseBtn').disabled = false; };
+  r.readAsDataURL(f);
+}
+
+$('parseBtn').onclick = async function () {
+  var code = $('code').value.trim();
+  if (!code) { show('err', 'Введи код доступа'); return; }
+  $('parseBtn').disabled = true;
+  show('info', 'Читаю счёт…');
+  try {
+    var resp = await fetch(WORKER, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code, pdfBase64: pdf64 })
+    });
+    var j = await resp.json();
+    if (!resp.ok) throw new Error(j.error || 'Ошибка');
+    inv = j.data;
+    try { localStorage.setItem('paid-code', code); } catch (e) {}
+    $('f_no').textContent = inv.invoiceNumber || '—';
+    $('f_date').textContent = inv.invoiceDate || '—';
+    $('f_from').textContent = inv.fromCompany || '—';
+    $('f_to').textContent = inv.toCompany || '—';
+    $('f_amt').textContent = Number(inv.amount || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + (inv.currency || '');
+    $('preview').classList.remove('hide');
+    clearMsg();
+  } catch (e) {
+    show('err', String(e.message || e));
+  }
+  $('parseBtn').disabled = false;
+};
+
+$('paidBtn').onclick = async function () {
+  $('paidBtn').disabled = true;
+  show('info', 'Записываю…');
+  try {
+    var payload = Object.assign({ code: $('code').value.trim() }, inv);
+    var resp = await fetch(SCRIPT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload)
+    });
+    var j = await resp.json();
+    if (!j.ok) throw new Error(j.error || 'Ошибка записи');
+    show('ok', '✓ Счёт ' + inv.invoiceNumber + ' отмечен как оплаченный (' + j.paidDate + ').');
+    $('paidBtn').textContent = '✓ Записано';
+  } catch (e) {
+    show('err', String(e.message || e));
+    $('paidBtn').disabled = false;
+  }
+};
+
+$('resetBtn').onclick = function () {
+  pdf64 = null; inv = null;
+  $('file').value = '';
+  $('drop').className = 'drop';
+  $('drop').textContent = 'Нажми или перетащи PDF счёта';
+  $('parseBtn').disabled = true;
+  $('preview').classList.add('hide');
+  $('paidBtn').disabled = false;
+  $('paidBtn').textContent = '✓ Оплачено';
+  clearMsg();
+};
+</script>
+</body>
+</html>
